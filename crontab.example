@@ -1,0 +1,46 @@
+# AI News Fetcher Cron 定时任务配置示例
+#
+# 使用方法:
+# 1. 复制此文件内容: cat crontab.example
+# 2. 编辑crontab: crontab -e
+# 3. 粘贴内容并保存
+# 4. 查看定时任务: crontab -l
+
+# ==================== 示例配置 ====================
+
+# 每天早上9点运行
+0 9 * * * cd /Users/luojie/workspace/scrpit && /usr/bin/python3 ai_news_fetcher.py >> ai_news.log 2>&1
+
+# 每天早上8点和下午6点各运行一次
+# 0 8,18 * * * cd /Users/luojie/workspace/scrpit && /usr/bin/python3 ai_news_fetcher.py >> ai_news.log 2>&1
+
+# 每6小时运行一次
+# 0 */6 * * * cd /Users/luojie/workspace/scrpit && /usr/bin/python3 ai_news_fetcher.py >> ai_news.log 2>&1
+
+# 每周一早上9点运行
+# 0 9 * * 1 cd /Users/luojie/workspace/scrpit && /usr/bin/python3 ai_news_fetcher.py >> ai_news.log 2>&1
+
+# ==================== Cron 时间格式说明 ====================
+#
+# 格式: 分 时 日 月 周
+#
+# 分: 0-59
+# 时: 0-23
+# 日: 1-31
+# 月: 1-12
+# 周: 0-7 (0和7都代表周日)
+
+# 常用示例:
+# 0 9 * * *     - 每天9:00
+# 0 */6 * * *   - 每6小时
+# 0 9 * * 1     - 每周一9:00
+# 0 0 * * *     - 每天0:00 (午夜)
+# */30 * * * *  - 每30分钟
+# 0 9-17 * * 1-5  - 工作日9:00-17:00每小时
+
+# ==================== 注意事项 ====================
+#
+# 1. 请修改路径为你的实际项目路径
+# 2. 确保 python3 路径正确 (which python3)
+# 3. 日志会保存到 ai_news.log 文件
+# 4. 确保脚本有执行权限: chmod +x ai_news_fetcher.py
