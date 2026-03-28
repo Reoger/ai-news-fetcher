@@ -14,7 +14,11 @@ import os
 from typing import List, Dict
 import re
 import subprocess
+import shutil
 from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 # Google翻译器（免费，无需API密钥）
 try:
@@ -83,6 +87,27 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, 'ai_articles')
 MAX_ARTICLES_PER_SOURCE = 5  # 每个源最多获取多少篇文章
 DAYS_TO_FETCH = 7  # 获取最近几天的新闻（改为7天以获取更多内容）
+
+# GitHub配置
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')  # GitHub Personal Access Token（可选，提高API限制）
+GITHUB_SEARCH_QUERIES = [
+    'LLM OR "large language model"',
+    'machine learning',
+    'AI OR artificial intelligence',
+    'multimodal OR "computer vision"',
+    'langchain OR "vector database"',
+]
+GITHUB_TRENDING_URL = 'https://github.com/trending'
+GITHUB_REPOS_TO_WATCH = [
+    'openai/whisper',  # OpenAI语音识别
+    'langchain-ai/langchain',  # LangChain框架
+    'microsoft/semantic-kernel',  # 微软语义内核
+    'TransformerOptimus/SuperAGI',  # AI Agent框架
+    ' Vaughnzan/Knowledge-GPT',  # 知识库问答
+]
+
+# 飞书配置
+FEISHU_CHAT_ID = os.getenv('FEISHU_CHAT_ID', 'oc_76cb06231ced648365fe0bf033e6db15')  # 飞书群聊ID
 
 # ==================== 核心功能 ====================
 
@@ -363,6 +388,304 @@ class AINewsFetcher:
 
         return articles
 
+    def fetch_from_github_trending(self) -> List[Dict]:
+        """从GitHub Trending获取热门AI项目"""
+        print("🔥 正在从GitHub Trending获取热门AI项目...")
+        articles = []
+
+        try:
+            # 爬取GitHub Trending页面
+            response = requests.get(GITHUB_TRENDING_URL, timeout=10, headers={
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            })
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # 查找所有项目条目
+            repo_items = soup.select('article.Box-row')
+
+            for item in repo_items[:MAX_ARTICLES_PER_SOURCE]:
+                try:
+                    # 获取项目名称和链接
+                    title_elem = item.select_one('h2 a')
+                    if not title_elem:
+                        continue
+
+                    repo_link = title_elem.get('href', '')
+                    repo_name = repo_link.strip('/')
+                    repo_url = f"https://github.com{repo_link}"
+
+                    # 获取项目描述
+                    desc_elem = item.select_one('p')
+                    description = desc_elem.get_text(strip=True) if desc_elem else '暂无描述'
+
+                    # 获取编程语言和star数
+                    language_elem = item.select_one('span[itemprop="programmingLanguage"]')
+                    language = language_elem.get_text(strip=True) if language_elem else 'Unknown'
+
+                    star_elem = item.select_one('a[href$="/stargazers"]')
+                    stars = star_elem.get_text(strip=True) if star_elem else '0'
+
+                    # 检查是否为AI相关项目（通过关键词）
+                    ai_keywords = ['ai', 'machine learning', 'llm', 'gpt', 'langchain',
+                                   'transformer', 'diffusion', 'vision', 'multimodal',
+                                   'embedding', 'vector', 'agent', 'chatbot', 'openai',
+                                   'hugging', 'anthropic', 'semantic', 'rag', 'inference']
+
+                    text_to_check = f"{repo_name} {description}".lower()
+                    if not any(keyword in text_to_check for keyword in ai_keywords):
+                        continue
+
+                    article = {
+                        'title': f"⭐ {repo_name} ({language}, {stars} stars)",
+                        'link': repo_url,
+                        'summary': description[:200] + '...' if len(description) > 200 else description,
+                        'published': datetime.now().strftime('%Y-%m-%d'),
+                        'source': "GitHub - Trending"
+                    }
+
+                    # 翻译英文内容
+                    article = self._translate_article(article)
+
+                    articles.append(article)
+                    print(f"  ✓ {article['title'][:50]}...")
+
+                except Exception as e:
+                    continue
+
+        except Exception as e:
+            print(f"  ✗ 获取GitHub Trending失败: {str(e)}")
+
+        return articles
+
+    def fetch_from_github_search(self) -> List[Dict]:
+        """从GitHub Search API搜索热门AI仓库"""
+        print("🔍 正在从GitHub搜索热门AI仓库...")
+        articles = []
+
+        # 如果没有token，跳过（API限制太严格）
+        if not GITHUB_TOKEN:
+            print("  ⚠️  未配置GITHUB_TOKEN，跳过GitHub搜索（可选）")
+            return articles
+
+        headers = {'Authorization': f'token {GITHUB_TOKEN}'}
+
+        for query in GITHUB_SEARCH_QUERIES[:2]:  # 只搜索前2个查询，避免超限
+            try:
+                # 简化查询，只使用python语言，按star数排序
+                params = {
+                    'q': f'{query} language:python stars:>500',
+                    'sort': 'stars',
+                    'order': 'desc',
+                    'per_page': 3  # 每个查询获取3个结果
+                }
+
+                response = requests.get(
+                    'https://api.github.com/search/repositories',
+                    headers=headers,
+                    params=params,
+                    timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                total = data.get('total_count', 0)
+                if total > 0:
+                    print(f"  找到 {total} 个相关仓库")
+
+                for item in data.get('items', [])[:3]:
+                    # 获取并增强描述
+                    original_desc = item.get('description', '')
+                    enhanced_summary = self._enhance_github_description(
+                        item['name'],
+                        item['owner']['login'],
+                        original_desc
+                    )
+
+                    article = {
+                        'title': f"📦 {item['name']} (⭐ {item['stargazers_count']:,})",
+                        'link': item['html_url'],
+                        'summary': enhanced_summary,
+                        'published': item['updated_at'][:10],
+                        'source': "GitHub - 热门项目"
+                    }
+
+                    # 翻译英文内容
+                    article = self._translate_article(article)
+
+                    articles.append(article)
+                    print(f"  ✓ {article['title'][:50]}...")
+
+                # 避免API限流
+                import time
+                time.sleep(1)
+
+            except Exception as e:
+                print(f"  ✗ GitHub搜索失败 ({query}): {str(e)}")
+                continue
+
+        return articles
+
+    def _enhance_github_description(self, repo_name: str, owner_login: str, original_desc: str) -> str:
+        """增强GitHub项目描述，如果描述太短则尝试获取README或添加补充说明"""
+        # 如果原描述已经足够长（>80字符），直接使用
+        if original_desc and len(original_desc) > 80:
+            return original_desc[:200] + ('...' if len(original_desc) > 200 else '')
+
+        # 如果描述太短，尝试获取README的第一段
+        if not GITHUB_TOKEN:
+            return self._add_fallback_description(repo_name, original_desc)
+
+        try:
+            headers = {'Authorization': f'token {GITHUB_TOKEN}'}
+            readme_url = f'https://api.github.com/repos/{owner_login}/{repo_name}/readme'
+            response = requests.get(readme_url, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                import base64
+                readme_data = response.json()
+                # GitHub API返回的是base64编码的内容
+                content = base64.b64decode(readme_data['content']).decode('utf-8', errors='ignore')
+
+                # 清理HTML和XML标签
+                content = re.sub(r'<[^>]+>', '', content)
+                # 移除所有方括号和圆括号（简单但有效）
+                content = re.sub(r'\[\[?', '', content)
+                content = re.sub(r'\]\]?', ' ', content)
+                content = re.sub(r'\([^\)]*\)', ' ', content)
+                # 清理markdown标题
+                content = re.sub(r'^#+\s+', '', content, flags=re.MULTILINE)
+                # 清理特殊符号和HTML实体
+                content = re.sub(r'&\w+;', ' ', content)
+                content = re.sub(r'\|', '', content)
+                content = re.sub(r'\*\*', '', content)
+                content = re.sub(r'\*+', '', content)
+                content = re.sub(r'_{2,}', '', content)
+                content = re.sub(r'`+', '', content)
+                # 合并多余空格
+                content = re.sub(r'\s+', ' ', content)
+
+                # 提取纯文本段落
+                lines = content.split('\n')
+                enhanced_desc = ''
+
+                for line in lines[:30]:  # 看前30行
+                    line = line.strip()
+                    # 跳过标题行（以#开头）、空行、特殊标记
+                    if not line or line.startswith('#') or line.startswith('![') or line.startswith('```'):
+                        continue
+
+                    enhanced_desc += line + ' '
+                    if len(enhanced_desc) > 100:  # 获取足够的内容
+                        break
+
+                # 清理多余空格
+                enhanced_desc = ' '.join(enhanced_desc.split())
+
+                if len(enhanced_desc) > 50:
+                    return enhanced_desc[:200] + ('...' if len(enhanced_desc) > 200 else '')
+
+        except Exception:
+            pass
+
+        # 如果所有尝试都失败，使用fallback
+        return self._add_fallback_description(repo_name, original_desc)
+
+    def _add_fallback_description(self, repo_name: str, original_desc: str) -> str:
+        """为描述太短的项目添加fallback说明"""
+        if not original_desc:
+            original_desc = '暂无描述'
+
+        # 常见AI项目的补充说明
+        fallbacks = {
+            'langchain': ' - 用于构建LLM应用的框架，支持链式调用、Agent、工具集成等功能',
+            'transformers': ' - Hugging Face的深度学习框架，支持PyTorch、TensorFlow和JAX',
+            'autogpt': ' - 自主AI代理，可以自动完成复杂任务的AI助手',
+            'whisper': ' - OpenAI的语音识别系统，支持多语言转录和翻译',
+            'stable-diffusion': ' - 文本生成图像的AI模型，可生成高质量图片',
+            'semantic-kernel': ' - 微软的AI编排框架，集成LLM到应用中',
+        }
+
+        # 检查是否匹配已知项目
+        for key, fallback in fallbacks.items():
+            if key.lower() in repo_name.lower():
+                enhanced = original_desc + fallback
+                return enhanced[:200] + ('...' if len(enhanced) > 200 else '')
+
+        # 通用补充
+        if len(original_desc) < 50:
+            enhanced = original_desc + ' - AI/Machine Learning相关项目'
+            return enhanced[:200]
+
+        return original_desc[:200] + ('...' if len(original_desc) > 200 else '')
+
+    def fetch_from_github_repos(self) -> List[Dict]:
+        """监控重点AI仓库的更新"""
+        print("👀 正在检查重点AI仓库的更新...")
+        articles = []
+
+        if not GITHUB_TOKEN:
+            print("  ⚠️  未配置GITHUB_TOKEN，使用基础检查...")
+
+        for repo_path in GITHUB_REPOS_TO_WATCH[:3]:  # 只检查前3个
+            try:
+                headers = {}
+                if GITHUB_TOKEN:
+                    headers['Authorization'] = f'token {GITHUB_TOKEN}'
+
+                # 获取仓库信息
+                response = requests.get(
+                    f'https://api.github.com/repos/{repo_path}',
+                    headers=headers,
+                    timeout=10
+                )
+
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+
+                repo_data = response.json()
+
+                # 检查最近7天是否有更新
+                from datetime import timedelta
+                updated_at = datetime.strptime(repo_data['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
+                if updated_at < datetime.now() - timedelta(days=DAYS_TO_FETCH):
+                    continue
+
+                # 获取最新release
+                release_response = requests.get(
+                    f'https://api.github.com/repos/{repo_path}/releases/latest',
+                    headers=headers,
+                    timeout=10
+                )
+
+                release_info = ''
+                if release_response.status_code == 200:
+                    release_data = release_response.json()
+                    if release_data.get('tag_name'):
+                        release_info = f" 最新版本: {release_data['tag_name']}"
+
+                article = {
+                    'title': f"🚀 {repo_path} 更新{release_info}",
+                    'link': repo_data['html_url'],
+                    'summary': repo_data.get('description', '暂无描述')[:200],
+                    'published': repo_data['updated_at'][:10],
+                    'source': "GitHub - 重点关注"
+                }
+
+                # 翻译英文内容
+                article = self._translate_article(article)
+
+                articles.append(article)
+                print(f"  ✓ {article['title'][:50]}...")
+
+            except Exception as e:
+                print(f"  ✗ 检查仓库失败 ({repo_path}): {str(e)}")
+                continue
+
+        return articles
+
     def _clean_html(self, html_content: str) -> str:
         """清理HTML标签，保留纯文本，限制在200字以内"""
         if not html_content:
@@ -473,15 +796,40 @@ class AINewsFetcher:
 
 {article_content}"""
 
+            # 获取openclaw的绝对路径，避免cron环境下PATH变量问题
+            # 优先使用shutil.which，如果找不到则尝试已知的nvm路径
+            openclaw_path = shutil.which('openclaw')
+
+            # 如果shutil.which找不到，尝试nvm路径
+            if not openclaw_path:
+                possible_paths = [
+                    os.path.expanduser('~/.nvm/versions/node/v24.14.0/bin/openclaw'),
+                    '/Users/luojie/.nvm/versions/node/v24.14.0/bin/openclaw',
+                    os.path.expanduser('~/npm-global/bin/openclaw'),
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        openclaw_path = path
+                        break
+
+            if not openclaw_path:
+                print("⚠️  找不到openclaw命令，跳过飞书推送")
+                print(f"   提示: 请确保openclaw已安装或在PATH中")
+                print(f"   调试: shutil.which结果: {shutil.which('openclaw')}")
+                print(f"   调试: nvm路径存在: {os.path.exists('/Users/luojie/.nvm/versions/node/v24.14.0/bin/openclaw')}")
+                return
+
             # 使用openclaw发送到飞书
-            # 注意：需要先通过 openclaw channels login --channel feishu 登录飞书
-            # 如果gateway未运行，会尝试使用本地模式
+            # 使用--channel feishu --deliver实际发送消息
+            # 使用--to参数指定目标群聊
             result = subprocess.run(
                 [
-                    'openclaw', 'agent',
+                    openclaw_path, 'agent',
                     '--agent', 'main',
+                    '--to', FEISHU_CHAT_ID,
                     '--message', message,
-                    '--local',  # 使用本地模式，不需要gateway
+                    '--channel', 'feishu',
+                    '--deliver'
                 ],
                 capture_output=True,
                 text=True,
@@ -489,36 +837,22 @@ class AINewsFetcher:
             )
 
             if result.returncode == 0:
-                print("✅ 已通过本地模式发送AI动态日报")
+                print("✅ 已发送AI动态日报到飞书")
             else:
-                # 如果失败，尝试使用gateway模式（需要gateway运行）
-                result2 = subprocess.run(
-                    [
-                        'openclaw', 'agent',
-                        '--agent', 'main',
-                        '--message', message,
-                        '--channel', 'feishu',
-                        '--deliver'
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=120
-                )
+                print(f"⚠️  飞书通知发送失败")
+                # 只打印简要错误
+                if result.stderr:
+                    error_msg = result.stderr.split('\n')[0] if '\n' in result.stderr else result.stderr
+                    print(f"   错误: {error_msg[:100]}")
 
-                if result2.returncode == 0:
-                    print("✅ 已发送AI动态日报到飞书")
-                else:
-                    print(f"⚠️  飞书通知发送失败（可能需要启动gateway或检查配置）")
-                    # 只打印简要错误，不显示完整的错误堆栈
-                    if "gateway" in result2.stderr.lower():
-                        print(f"   提示: 如需发送到飞书，请先启动openclaw gateway")
-
-        except FileNotFoundError:
-            print("⚠️  找不到文章文件，跳过飞书推送")
+        except IOError as e:
+            # 文件相关的错误（包括文件不存在、无权限等）
+            print(f"⚠️  无法读取文章文件: {filename}")
+            print(f"   错误: {str(e)}")
         except subprocess.TimeoutExpired:
             print("⚠️  飞书通知发送超时")
         except Exception as e:
-            print(f"⚠️  飞书通知发送出错: {str(e)}")
+            print(f"⚠️  飞书通知发送出错: {type(e).__name__}: {str(e)}")
 
     def generate_markdown(self, articles: List[Dict]) -> str:
         """生成Markdown格式的文章"""
@@ -599,6 +933,15 @@ class AINewsFetcher:
 
         # 3. 网站爬取
         all_articles.extend(self.scrape_websites())
+
+        # 4. GitHub Trending热门AI项目
+        all_articles.extend(self.fetch_from_github_trending())
+
+        # 5. GitHub搜索最新AI仓库
+        all_articles.extend(self.fetch_from_github_search())
+
+        # 6. GitHub重点仓库监控
+        all_articles.extend(self.fetch_from_github_repos())
 
         # 去重（基于标题相似度）
         all_articles = self._deduplicate_articles(all_articles)
